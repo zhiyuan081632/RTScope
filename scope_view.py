@@ -5,7 +5,7 @@ scope_view.py — RTScope 主窗口 (Adobe Audition 风格)
 
 界面构成
 --------
-- 顶部单行设置栏 (字体加大): 声卡 / 通道 / 采样率 / 块长 / 窗口 / 算法 / [显示源切换]。
+- 顶部单行设置栏 (字体加大): 声卡 / 通道 / 采样率 / 块长 / 窗口 / 算法 / 增益(dB) / [显示源切换]。
   启动只进面板, 不自动录音; 录制/播放中锁定这些设置。
 - 中央: 单通道波形轨 —— 黑底 + 浅绿色 min/max 包络。
   * 录制态: 短窗口, 时间轴左(旧)→右(新), 最新在右缘平滑左滚 (类 Audition 录制)。
@@ -14,9 +14,11 @@ scope_view.py — RTScope 主窗口 (Adobe Audition 风格)
 - 底部走带条 (Audition 式, 居中): ● 录音 / ▶ 播放 / ■ 停止。
 - 最后一行状态栏显示运行/编辑信息; 停止录音后在状态栏显示保存路径。
 
-显示源 (热切换按钮): 'proc'=算法波束输出, 'raw'=直通 mic0。
+显示源 (热切换按钮): 'proc'=算法波束输出, 'raw'=直通 mic0 (已经前置增益放大)。
 录制中算法处理器始终运行、proc.wav 始终录所选算法, 切换只改「显示/回放」的源,
 保证算法持续收敛 (符合"切到直通时原算法仍在跑, 只是显示了直通的")。
+前置增益 (gain_spin, dB, 默认 20): 仅麦克风通道放大 (ref 通道不变) 再送算法/直通显示, 并额外录 gain.wav;
+raw.wav 保留未加增益的采集原貌。增益仅录音开始前可设置 (录制中锁定)。
 """
 
 import math
@@ -392,11 +394,11 @@ class ScopeWindow(QtWidgets.QMainWindow):
             " stop:0 #2a2a2a, stop:1 #1d1d1d); border-bottom:1px solid #0c0c0c; }"
             "QLabel { color:#cfcfcf; background:transparent; font-size:11pt; }"
             "QLabel#cap { color:#9aa79a; font-size:10pt; }"
-            "QComboBox, QSpinBox { background:#333333; color:#eaeaea; font-size:11pt;"
+            "QComboBox, QSpinBox, QDoubleSpinBox { background:#333333; color:#eaeaea; font-size:11pt;"
             " border:1px solid #4d4d4d; padding:3px 8px; border-radius:4px;"
             " min-height:22px; }"
-            "QComboBox:hover, QSpinBox:hover { border-color:#6a8f6a; }"
-            "QComboBox:disabled, QSpinBox:disabled { color:#7a7a7a; background:#262626; }"
+            "QComboBox:hover, QSpinBox:hover, QDoubleSpinBox:hover { border-color:#6a8f6a; }"
+            "QComboBox:disabled, QSpinBox:disabled, QDoubleSpinBox:disabled { color:#7a7a7a; background:#262626; }"
             "QComboBox QAbstractItemView { background:#2f2f2f; color:#eaeaea;"
             " font-size:11pt; selection-background-color:#3a5a3a; }"
             "QPushButton { background:#333333; color:#eaeaea; border:1px solid #4d4d4d;"
@@ -490,6 +492,19 @@ class ScopeWindow(QtWidgets.QMainWindow):
             self.alg_combo.addItem("(无可用算法)")
             self.alg_combo.setEnabled(False)
         row.addWidget(self.alg_combo)
+
+        row.addWidget(self._cap("增益"))
+        self.gain_spin = QtWidgets.QDoubleSpinBox()
+        self.gain_spin.setRange(-20.0, 60.0)
+        self.gain_spin.setDecimals(1)
+        self.gain_spin.setSingleStep(1.0)
+        self.gain_spin.setSuffix(" dB")
+        self.gain_spin.setValue(20.0)
+        self.gain_spin.setToolTip(
+            "数字前置增益: 仅麦克风通道按此放大 (参考信号通道不变), 再送算法处理 / 直通显示 / gain.wav 录音\n"
+            "0 dB = 不放大; 例 10 dB ≈ ×3.16, 20 dB ≈ ×10 (默认)。仅录音开始前可设置, 录制中锁定")
+        self.gain_spin.valueChanged.connect(self._on_gain)
+        row.addWidget(self.gain_spin)
 
         self.src_lbl = QtWidgets.QLabel("显示：")
         self.src_lbl.setObjectName("cap")
@@ -618,12 +633,14 @@ class ScopeWindow(QtWidgets.QMainWindow):
             j = self.alg_combo.findText(ini["algorithm"])
             if j >= 0:
                 self.alg_combo.setCurrentIndex(j)
+        if ini.get("gain_db") is not None:
+            self.gain_spin.setValue(float(ini["gain_db"]))
 
     def _set_mode(self, mode):
         self.mode = mode
         settings_locked = mode in (MODE_REC, MODE_PLAY)
         for wgt in (self.device_combo, self.channels_spin, self.rate_combo,
-                    self.block_combo, self.alg_combo):
+                    self.block_combo, self.alg_combo, self.gain_spin):
             wgt.setEnabled(not settings_locked)
         self.win_combo.setEnabled(mode in (MODE_IDLE, MODE_REC))
         self.src_btn.setEnabled(mode != MODE_IDLE or True)   # 始终可切源对比
@@ -667,7 +684,8 @@ class ScopeWindow(QtWidgets.QMainWindow):
                                          rate=rate, blocksize=block,
                                          algorithm=algorithm,
                                          record=self.controller.record,
-                                         capture_dir=self.controller.capture_dir)
+                                         capture_dir=self.controller.capture_dir,
+                                         gain_db=self.gain_spin.value())
         except Exception as e:
             QtWidgets.QMessageBox.warning(self, "无法开始", str(e))
             print("[ui] 录音启动失败: %s" % e)
@@ -687,9 +705,10 @@ class ScopeWindow(QtWidgets.QMainWindow):
         self.full_proc = np.zeros(0, dtype=np.float32)
         self.full_raw0 = np.zeros(0, dtype=np.float32)
         self._set_mode(MODE_REC)
-        print("[ui] 录音开始: 设备 %s | %dHz %dch block%d | 算法 %s | 录音目录 %s"
+        print("[ui] 录音开始: 设备 %s | %dHz %dch block%d | 算法 %s | 增益 %+.1fdB | 录音目录 %s"
               % (info["device_name"], info["rate"], info["channels"],
-                 info["blocksize"], info["algorithm"], info.get("cap_dir") or "(未录音)"))
+                 info["blocksize"], info["algorithm"], self.gain_spin.value(),
+                 info.get("cap_dir") or "(未录音)"))
 
     def _on_stop(self):
         if self.mode == MODE_REC:
@@ -747,6 +766,13 @@ class ScopeWindow(QtWidgets.QMainWindow):
             self._live_n = 0
             self.ruler.set_mode("editor")
             self.ruler.set_duration(sec)
+
+    def _on_gain(self, val):
+        """前置增益编辑框: 仅录音开始前可设置 (录制中界面锁定), 作为下次录音初值。"""
+        db = float(val)
+        self.controller.set_gain_db(db)
+        print("[ui] 前置增益 -> %+.1f dB (线性 ×%.3f)" % (db, 10.0 ** (db / 20.0)))
+        self._update_status()
 
     def _resize_buffer(self, sec):
         W = max(2, int(sec * self.rate))
@@ -896,8 +922,9 @@ class ScopeWindow(QtWidgets.QMainWindow):
         if self.mode == MODE_REC and eng is not None:
             rec_txt = " | 录音 %s" % self.controller.cap_dir if self.controller.cap_dir else ""
             self.status_lbl.setText(
-                "录制 %.1fs | 算法 %s | 源 %s | %dHz·%dch·block%d | 窗口 %.0fs | xrun=%d%s"
+                "录制 %.1fs | 算法 %s | 源 %s | 增益 %+.1fdB | %dHz·%dch·block%d | 窗口 %.0fs | xrun=%d%s"
                 % (eng.elapsed, self.controller.algorithm or "-", self._src_name(),
+                   self.controller.gain_db,
                    eng.samplerate, eng.channels, eng.blocksize, self.window_sec,
                    eng.xrun_count, rec_txt))
             self.save_link.hide()

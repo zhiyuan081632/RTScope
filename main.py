@@ -5,13 +5,13 @@ main.py — RTScope 入口
 
 启动只进控制面板 (Adobe Audition 风格), 不自动录音: 在界面里选声卡/参数/算法,
 点「开始」才采集。显示为单通道算法波束 (默认 nbf), 黑底浅绿滚动波形 + 右侧 RMS 标尺。
-录音存 captures/cap_<时间戳>/raw.wav (原始多通道) + proc.wav (所选单一算法)。
+录音存 captures/cap_<时间戳>/raw.wav (原始多通道) + gain.wav(放大后) + proc.wav (所选单一算法)。
 
 用法（conda py39）
 ------------------
     python main.py --list                 # 列出音频设备后退出
-    python main.py                        # bothlent 线性4麦, 进控制面板 (不自动录音)
-    python main.py --algorithm nbf --window 2
+    python main.py                        # bothlent 线性4麦, 启动控制面板，但不自动录音
+    python main.py --algorithm nbf --window 10
     python main.py --no-record            # 只显示不录音
 """
 
@@ -46,6 +46,8 @@ def build_argparser():
                     help="显示窗口秒数初值（默认 10; 录制填充期波形自左向右生长）")
     ap.add_argument("--algorithm", type=str, default="nbf",
                     help="算法初值（默认 nbf; 可选见界面下拉）")
+    ap.add_argument("--gain-db", dest="gain_db", type=float, default=20.0,
+                    help="数字前置增益 dB 初值（默认 20; 原始信号先放大再送算法/显示/gain.wav; 仅录音开始前设置）")
     ap.add_argument("--capture-dir", type=str, default=None,
                     help="录音根目录（默认 captures/cap_<时间戳>/，内含 raw.wav + proc.wav）")
     ap.add_argument("--no-record", action="store_true", help="只显示波形，不录音")
@@ -91,6 +93,7 @@ def main():
         "blocksize": args.blocksize,
         "window": args.window,
         "algorithm": args.algorithm,
+        "gain_db": args.gain_db,
     }
     print("[RTScope] 界面初值: %s" % initial)
     print("[RTScope] 录音: %s | 录音根目录: %s"

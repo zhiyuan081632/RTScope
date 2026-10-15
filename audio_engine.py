@@ -5,9 +5,9 @@ audio_engine.py — 多通道实时采集引擎（直通 + 算法双路径）+ W
 
 设计要点
 --------
-- sounddevice.InputStream 回调线程只做「拷贝 -> processor -> 入队」，绝不做重活。
-- 双路径：每个采集块同时保留 raw(直通) 与 proc(算法处理后) 两路，
-  上层视图可实时切换显示。当前 processor 为恒等，proc == raw。
+- sounddevice.InputStream 回调线程只做「拷贝 -> (前置增益) -> processor -> 入队」，绝不做重活。
+- 数字前置增益：仅放大麦克风通道 (前 gain_channels 路)，参考信号 (ref) 通道保持不变；
+  raw.wav 始终存未加增益的采集原貌，gain.wav 存放大后信号，proc.wav 存算法输出。
 - 采集数据原样保留：不做 mute / 置零 / 归一化（遵循项目"采过来什么就是什么"约定）。
 - 录音落 float32 WAV，保留原始精度。
 """
@@ -110,14 +110,19 @@ class AudioEngine(object):
     """
 
     def __init__(self, device, samplerate, channels, blocksize,
-                 processor=None, recorder=None, proc_recorder=None):
+                 processor=None, recorder=None, proc_recorder=None,
+                 gain_recorder=None, gain_db=0.0, gain_channels=None):
         self.device = device
         self.samplerate = samplerate
         self.channels = channels
         self.blocksize = blocksize
         self.processor = processor or IdentityProcessor()
-        self.recorder = recorder                # 原始直通录音 (raw)
+        self.recorder = recorder                # 原始直通录音 (raw, 未加增益)
         self.proc_recorder = proc_recorder      # 算法处理后录音 (proc)
+        self.gain_recorder = gain_recorder      # 放大后多通道录音 (gain)
+        # 仅前 gain_channels 路 (麦克风通道) 施加增益, ref 通道不变; None=全通道
+        self.gain_channels = channels if gain_channels is None else int(gain_channels)
+        self.set_gain_db(gain_db)               # 数字前置增益 (dB)
 
         self.processor.reset(samplerate, channels)
         self.proc_channels = self.processor.out_channels or channels
@@ -130,30 +135,49 @@ class AudioEngine(object):
             samplerate=samplerate, blocksize=blocksize, device=device,
             channels=channels, dtype="float32", callback=self._callback)
 
+    def set_gain_db(self, db):
+        """设置数字前置增益 (dB); 仅作用于麦克风通道, 参考信号通道保持不变。
+        增益在录音开始前设定 (录制中界面锁定), 回调线程读取最新值。"""
+        self.gain_db = float(db)
+        self.gain_linear = 10.0 ** (self.gain_db / 20.0)
+
     def _callback(self, indata, frames, time_info, status):
         if self._t0 is None:
             self._t0 = time.time()
         if status:
             self.xrun_count += 1
         raw = np.array(indata, copy=True)
-        # 录音落直通原始数据
+        # 录音落原始直通数据 (未加增益, 保留采集原貌)
         if self.recorder is not None:
             self.recorder.put(raw)
-        # 算法路径
+        # 数字前置增益: 仅放大麦克风通道 (前 gain_channels 路), 参考信号通道保持不变;
+        # 放大后送算法/直通显示/增益录音 (raw.wav 仍为未加增益的采集原貌)
+        gl = self.gain_linear
+        if gl == 1.0:
+            gained = raw
+        else:
+            gained = raw.copy()
+            if self.gain_channels >= gained.shape[1]:
+                gained *= gl                       # 无 mic 信息时退化为全通道
+            else:
+                gained[:, :self.gain_channels] *= gl
+        if self.gain_recorder is not None:
+            self.gain_recorder.put(gained)
+        # 算法路径 (吃放大后的信号)
         try:
-            proc = self.processor.process(raw)
+            proc = self.processor.process(gained)
         except Exception as e:  # 算法异常不拖垮采集
-            proc = raw
+            proc = gained
             self._proc_err = str(e)
         # 录音落算法处理后数据 (当前选中算法的波束输出)
         if self.proc_recorder is not None and proc is not None and proc.shape[0] > 0:
             self.proc_recorder.put(np.asarray(proc, dtype=np.float32))
         try:
-            self.disp_q.put_nowait((raw, proc))
+            self.disp_q.put_nowait((gained, proc))   # 直通显示 = 放大后 mic0
         except queue.Full:
             try:
                 self.disp_q.get_nowait()
-                self.disp_q.put_nowait((raw, proc))
+                self.disp_q.put_nowait((gained, proc))
             except queue.Empty:
                 pass
 
