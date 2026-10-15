@@ -16,6 +16,7 @@
 - **显示源热切换**：算法波束 ↔ 直通 mic0；录制中算法处理器始终运行（保证收敛），切换只改显示/回放源。
 - **运行日志**：启动即接管控制台输出；录音开始时挂载到当次 `cap_*` 目录的 `run.log`，并补写启动以来的历史行（硬件档案 / 算法 / 设备参数 / `[run]` / `[stop]` 统计 / 保存路径）。停止时若 raw 与 proc 帧数相对偏差 >2% 会在日志告警。
 - **硬件档案**：`hardware.py` 集中登记麦阵（默认 bothlent 线性 4 麦、间距 3.5cm、Mic0→Mic3 左→右），`--hardware` 切换，驱动通道数、麦阵几何与 conf 前缀。
+- **离线批量对比**：`offline_eval.py` 读入一次录音的 `raw.wav`，用与实时相同的处理器逐个复现「单路直通(mic0) + nbf + 所有 SoundConnect 算法(含 bypass)」，结果落到 `cap_*/offline/<alg>.wav` 并生成 `summary.txt`（时长/RMS/峰值/削波），方便横向 A/B 试听与性能对比。
 
 ## 运行（conda py39）
 
@@ -26,6 +27,10 @@ python main.py                 # 进控制面板 (不自动录音)
 python main.py --list          # 列出音频设备后退出
 python main.py --algorithm nbf --window 10
 python main.py --no-record     # 只显示不录音
+
+# 离线批量复现所有算法, 输出到 cap_*/offline/ 供对比
+python offline_eval.py captures/cap_20261015_160623
+python offline_eval.py <cap_dir> --algorithms passthrough,nbf,mvdr
 ```
 
 常用参数：`--hardware`（硬件档案）、`--device`（输入设备索引）、`--channels`、`--rate`、`--blocksize`、`--window`（显示窗口秒数，默认 10）、`--algorithm`、`--capture-dir`（录音根目录）、`--no-record`、`--list`。
@@ -44,6 +49,7 @@ hardware.py          硬件档案 (麦阵几何 / conf 前缀)
 scope_view.py        PyQt5 主窗口 (录制/编辑/回放三态)
 playback.py          回放播放器 (sounddevice 输出流)
 applog.py            运行日志 (Tee 控制台 + cap 目录 run.log)
+offline_eval.py      离线批量复现各算法 -> cap_*/offline/ (对比性能)
 conf/                SoundConnect 配置 (bothlent_line4mic_sc_*.conf)
 lib/                 原生库 (SoundConnect.dll / webrtc_bf.dll)
 sc_py/               SoundConnect Python 绑定 (SoundConnect.py)
